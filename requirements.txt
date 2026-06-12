@@ -1,0 +1,6 @@
+pyTelegramBotAPI
+requests
+pycryptodome
+yt-dlp
+cloudscraper
+Telethon
