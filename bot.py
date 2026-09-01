@@ -1,9 +1,8 @@
 """
-Fast-Bot-Render - Full Classplus/Concept RNA + PW/Appx Auto Extractor
+Fast-Bot-Render - Auto OTP Login + Classplus/Concept RNA Extractor
 """
 import os
 import re
-import json
 import asyncio
 import aiohttp
 import logging
@@ -12,7 +11,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Web Server for Render Port Binding
+# Render Web Port Binding
 class SimpleServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -39,17 +38,22 @@ os.makedirs("downloads", exist_ok=True)
 bot = telebot.TeleBot(BOT_TOKEN)
 user_states = {}
 
+HEADERS = {
+    "User-Agent": "Mobile-Android",
+    "Accept": "application/json, text/plain, */*",
+    "region": "IN"
+}
+
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 1
     markup.add(
-        InlineKeyboardButton("📘 Classplus / Concept RNA 📘", callback_data="cp_mode"),
-        InlineKeyboardButton("🚀 Physics Wallah / Other 🚀", callback_data="pw_mode")
+        InlineKeyboardButton("📱 Concept RNA (Direct OTP Login) 📱", callback_data="cp_otp_mode")
     )
     bot.reply_to(
         message,
-        f"👋 **Namaste {message.from_user.first_name}!**\n\nCourse extract karne ke liye neeche platform chunein:",
+        f"👋 **Namaste {message.from_user.first_name}!**\n\nNeeche button par click karke direct course extract karein:",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -57,11 +61,13 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     chat_id = call.message.chat.id
-    if call.data == "cp_mode":
-        user_states[chat_id] = {"step": "CP_ORG"}
-        bot.send_message(chat_id, "🏢 **Step 1:** Apna **Org Code** bhejein (jaise `nbhom`):", parse_mode="Markdown")
-    elif call.data == "pw_mode":
-        bot.send_message(chat_id, "🔑 PW Batch link ya Token bhejein.")
+    if call.data == "cp_otp_mode":
+        user_states[chat_id] = {"step": "ASK_PHONE", "org_code": "nbhom", "course_id": "756679"}
+        bot.send_message(
+            chat_id,
+            "📱 **Apna 10-digit Mobile Number bhejein** (jis par Concept RNA account hai):",
+            parse_mode="Markdown"
+        )
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -69,64 +75,86 @@ def handle_text(message):
     state = user_states.get(chat_id, {})
     step = state.get("step")
 
-    if step == "CP_ORG":
-        state["org_code"] = message.text.strip().lower()
-        state["step"] = "CP_COURSE_ID"
-        bot.send_message(chat_id, "🆔 **Step 2:** Apna **Course ID** bhejein (jaise `756679`):", parse_mode="Markdown")
-    
-    elif step == "CP_COURSE_ID":
-        raw_text = message.text.strip()
-        match = re.search(r'\d+', raw_text)
-        course_id = match.group(0) if match else raw_text
-        state["course_id"] = course_id
-        state["step"] = "CP_TOKEN"
-        bot.send_message(
-            chat_id,
-            "🔑 **Step 3:** Apna **User/Access Token** bhejein:\n*(Mobile app / Web se nikala hua Bearer token)*",
-            parse_mode="Markdown"
-        )
-    
-    elif step == "CP_TOKEN":
-        token = message.text.strip().replace("Bearer ", "")
+    if step == "ASK_PHONE":
+        phone = message.text.strip().replace("+91", "").replace(" ", "")
+        if not re.match(r'^\d{10}$', phone):
+            bot.reply_to(message, "❌ Kripya 10 digit ka valid mobile number bhejein.")
+            return
+
+        state["phone"] = phone
+        state["step"] = "WAITING_OTP"
+        status_msg = bot.reply_to(message, "⏳ OTP bheja ja raha hai...")
+
+        threading.Thread(target=send_otp_task, args=(chat_id, status_msg.message_id, phone, state["org_code"])).start()
+
+    elif step == "WAITING_OTP":
+        otp = message.text.strip()
+        session_id = state.get("session_id")
         org_code = state.get("org_code", "nbhom")
         course_id = state.get("course_id", "756679")
-        
-        status_msg = bot.send_message(chat_id, "⏳ Course content scan aur extract kiya ja raha hai...")
-        user_states.pop(chat_id, None)
+        phone = state.get("phone")
 
-        threading.Thread(target=run_async_extractor, args=(chat_id, status_msg.message_id, org_code, course_id, token)).start()
+        status_msg = bot.reply_to(message, "⏳ OTP verify kiya ja raha hai...")
+        threading.Thread(target=verify_otp_and_extract_task, args=(chat_id, status_msg.message_id, org_code, course_id, phone, otp, session_id)).start()
 
-def run_async_extractor(chat_id, msg_id, org_code, course_id, token):
-    asyncio.run(extract_classplus_course(chat_id, msg_id, org_code, course_id, token))
+def send_otp_task(chat_id, msg_id, phone, org_code):
+    asyncio.run(send_otp_async(chat_id, msg_id, phone, org_code))
 
-async def fetch_folder_contents(session, headers, course_id, folder_id=0):
-    url = f"https://api.classplusapp.com/v2/course/content/get?courseId={course_id}&folderId={folder_id}"
-    try:
-        async with session.get(url, headers=headers, timeout=15) as resp:
-            if resp.status == 200:
+async def send_otp_async(chat_id, msg_id, phone, org_code):
+    url = "https://api.classplusapp.com/v2/otp/generate"
+    payload = {"mobile": phone, "orgCode": org_code}
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, headers=HEADERS, timeout=15) as resp:
                 data = await resp.json(content_type=None)
-                return data.get("data", {}).get("courseContent", [])
-    except Exception as e:
-        logger.error(f"Error fetching folder {folder_id}: {e}")
-    return []
+                if resp.status == 200 and data.get("status") == "success":
+                    session_id = data.get("data", {}).get("sessionId")
+                    user_states[chat_id]["session_id"] = session_id
+                    bot.edit_message_text("✅ OTP aapke number par bhej diya gaya hai!\n\n🔢 **OTP yahan send karein:**", chat_id, msg_id)
+                else:
+                    msg = data.get("message", "OTP request fail ho gaya.")
+                    bot.edit_message_text(f"❌ Error: {msg}", chat_id, msg_id)
+        except Exception as e:
+            bot.edit_message_text(f"❌ Connection error: {e}", chat_id, msg_id)
 
-async def extract_classplus_course(chat_id, msg_id, org_code, course_id, token):
-    headers = {
-        "x-access-token": token,
-        "User-Agent": "Mobile-Android",
-        "accept": "application/json",
-        "region": "IN"
+def verify_otp_and_extract_task(chat_id, msg_id, org_code, course_id, phone, otp, session_id):
+    asyncio.run(verify_and_extract_async(chat_id, msg_id, org_code, course_id, phone, otp, session_id))
+
+async def verify_and_extract_async(chat_id, msg_id, org_code, course_id, phone, otp, session_id):
+    url = "https://api.classplusapp.com/v2/users/verify"
+    payload = {
+        "mobile": phone,
+        "otp": otp,
+        "sessionId": session_id,
+        "orgCode": org_code
     }
 
-    extracted_items = []
-    
     async with aiohttp.ClientSession() as session:
-        # Check Token Validity
-        async with session.get(f"https://api.classplusapp.com/v2/orgs/{org_code}", headers=headers) as resp:
-            if resp.status != 200:
-                bot.edit_message_text("❌ Org Code verification failed.", chat_id, msg_id)
-                return
+        try:
+            async with session.post(url, json=payload, headers=HEADERS, timeout=15) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status != 200 or data.get("status") != "success":
+                    msg = data.get("message", "Galat OTP ya verification failed.")
+                    bot.edit_message_text(f"❌ Error: {msg}", chat_id, msg_id)
+                    return
 
+                token = data.get("data", {}).get("token")
+        except Exception as e:
+            bot.edit_message_text(f"❌ Login error: {e}", chat_id, msg_id)
+            return
+
+        # Token milte hi direct extraction start
+        bot.edit_message_text("✅ Login successful! Course scanning start ho chuki hai...", chat_id, msg_id)
+        
+        auth_headers = {
+            "x-access-token": token,
+            "User-Agent": "Mobile-Android",
+            "accept": "application/json",
+            "region": "IN"
+        }
+
+        extracted_items = []
         queue = [(0, "Root")]
         visited_folders = set()
 
@@ -136,36 +164,41 @@ async def extract_classplus_course(chat_id, msg_id, org_code, course_id, token):
                 continue
             visited_folders.add(current_folder_id)
 
-            contents = await fetch_folder_contents(session, headers, course_id, current_folder_id)
-            for item in contents:
-                item_type = item.get("contentType")
-                item_name = item.get("name", "Untitled")
+            content_url = f"https://api.classplusapp.com/v2/course/content/get?courseId={course_id}&folderId={current_folder_id}"
+            try:
+                async with session.get(content_url, headers=auth_headers, timeout=15) as c_resp:
+                    if c_resp.status == 200:
+                        c_data = await c_resp.json(content_type=None)
+                        contents = c_data.get("data", {}).get("courseContent", [])
+                        for item in contents:
+                            item_type = item.get("contentType")
+                            item_name = item.get("name", "Untitled")
 
-                if item_type == 1:  # Sub-folder
-                    sub_id = item.get("id")
-                    queue.append((sub_id, f"{path} > {item_name}"))
-                elif item_type == 2:  # Video
-                    url = item.get("url") or item.get("streamUrl") or item.get("videoUrl", "")
-                    extracted_items.append(f"📹 {item_name} : {url}")
-                elif item_type == 3:  # PDF Document
-                    url = item.get("url") or item.get("documentUrl", "")
-                    extracted_items.append(f"📄 {item_name} : {url}")
+                            if item_type == 1:
+                                sub_id = item.get("id")
+                                queue.append((sub_id, f"{path} > {item_name}"))
+                            elif item_type == 2:
+                                v_url = item.get("url") or item.get("streamUrl") or item.get("videoUrl", "")
+                                extracted_items.append(f"📹 {item_name} : {v_url}")
+                            elif item_type == 3:
+                                d_url = item.get("url") or item.get("documentUrl", "")
+                                extracted_items.append(f"📄 {item_name} : {d_url}")
+            except Exception as err:
+                logger.error(f"Folder fetch error: {err}")
 
-    if not extracted_items:
-        bot.edit_message_text("❌ Koi content extract nahi ho paya. Token expire ya Course ID galat ho sakti hai.", chat_id, msg_id)
-        return
+        if not extracted_items:
+            bot.edit_message_text("❌ Course khali mila ya content access nahi hua.", chat_id, msg_id)
+            return
 
-    # Save to TXT file
-    file_path = f"downloads/ConceptRNA_{course_id}.txt"
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(f"--- Concept RNA Extracted Course ({course_id}) ---\n\n")
-        for line in extracted_items:
-            f.write(line + "\n")
+        file_path = f"downloads/ConceptRNA_{course_id}.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(f"--- Concept RNA Extracted Batch ({course_id}) ---\n\n")
+            for line in extracted_items:
+                f.write(line + "\n")
 
-    bot.edit_message_text(f"✅ Extraction complete! Total {len(extracted_items)} items mile.", chat_id, msg_id)
-    with open(file_path, "rb") as doc:
-        bot.send_document(chat_id, doc, caption=f"📚 **Course ID:** `{course_id}`\n✨ **Total Files:** {len(extracted_items)}")
+        bot.edit_message_text(f"✅ Extraction complete! Total {len(extracted_items)} files mili hain.", chat_id, msg_id)
+        with open(file_path, "rb") as doc:
+            bot.send_document(chat_id, doc, caption=f"📚 **Course ID:** `{course_id}`\n✨ **Total Files:** {len(extracted_items)}")
 
 if __name__ == "__main__":
     bot.infinity_polling(skip_pending=True)
-    
