@@ -1,4 +1,20 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class SimpleServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Live!")
+
+def run_port():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleServer)
+    server.serve_forever()
+
+threading.Thread(target=run_port, daemon=True).start()
+import os
 import re
 import asyncio
 import subprocess
@@ -13,10 +29,11 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 # ==================== CONFIG ====================
-API_ID = 1888747
-API_HASH = "0d707e8ae15254b1453c614bf3026c32"
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8834527785:AAHRKC83GdyVErpwplApSNQELko0hHKiQKw')
-ADMIN_CHAT_ID = 5136226069
+API_ID = int(os.environ.get("API_ID", "1888747"))
+API_HASH = os.environ.get("API_HASH", "0d707e8ae15254b1453c614bf3026c32")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8834527785:AAHRKC83GdyVErpwplApSNQELko0hHKiQKw")
+ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "5136226069"))
+
 
 os.makedirs("downloads", exist_ok=True)
 
